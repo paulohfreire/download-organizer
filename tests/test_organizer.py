@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from download_organizer.core import JsonConfigStore, Organizer, OrganizerConfig, Rule
+from datetime import datetime, timezone
+
+from download_organizer.core import JsonConfigStore, JsonHistoryStore, Organizer, OrganizerConfig, Rule
 
 
 def make_organizer(tmp_path: Path) -> Organizer:
@@ -13,7 +15,7 @@ def make_organizer(tmp_path: Path) -> Organizer:
         unsorted_folder=str(tmp_path / "Unsorted"),
         allowed_locations=[str(tmp_path)],
     )
-    return Organizer(config, JsonConfigStore(tmp_path / "config.json"))
+    return Organizer(config, JsonConfigStore(tmp_path / "config.json"), JsonHistoryStore(tmp_path / "history.json"))
 
 
 def test_manual_run_moves_matching_and_unmatched_files(tmp_path: Path) -> None:
@@ -75,7 +77,8 @@ def test_folders_and_symlinks_are_ignored(tmp_path: Path) -> None:
 
     results = organizer.organize_now()
 
-    assert len(results) == 1
+    assert sum(item["status"] == "moved" for item in results) == 1
+    assert sum(item["status"] == "skip" for item in results) >= 1
     assert (downloads / "nested").is_dir()
 
 
@@ -86,5 +89,86 @@ def test_windows_shortcuts_are_ignored(tmp_path: Path) -> None:
 
     results = organizer.organize_now()
 
-    assert results == []
+    assert results[0]["status"] == "skip"
     assert (downloads / "shortcut.lnk").exists()
+
+
+def test_collisions_are_suffixed_and_history_persists(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    destination = tmp_path / "Documents"
+    organizer.add_rule(Rule("Text", ".txt", "*", str(destination)))
+    (destination).mkdir()
+    (destination / "note.txt").write_text("old")
+    source = Path(organizer.config.downloads_folder) / "note.txt"
+    source.write_text("new")
+
+    result = organizer.organize_now()[0]
+    loaded = JsonHistoryStore(tmp_path / "history.json").load()
+
+    assert Path(result["destination"]).name == "note (1).txt"
+    assert loaded[0].kind == "move"
+
+
+def test_failed_move_can_be_retried_and_notifies_once_per_minute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    current = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+    organizer = make_organizer(tmp_path)
+    organizer.clock = lambda: current[0]
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+    import download_organizer.core as core
+    real_move = core.shutil.move
+    monkeypatch.setattr(core.shutil, "move", lambda *_args: (_ for _ in ()).throw(OSError("locked")))
+
+    result = organizer.organize_now()[0]
+    assert result["status"] == "failure"
+    assert source.exists()
+    assert len(organizer.notifications) == 1
+    current[0] = current[0].replace(second=30)
+    organizer.retry_failed(force=True)
+    assert len(organizer.notifications) == 1
+    monkeypatch.setattr(core.shutil, "move", real_move)
+
+
+def test_failed_move_backoff_survives_reload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    organizer = make_organizer(tmp_path)
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+    import download_organizer.core as core
+    monkeypatch.setattr(core.shutil, "move", lambda *_args: (_ for _ in ()).throw(OSError("locked")))
+    organizer.organize_now()
+
+    reloaded = Organizer(
+        organizer.config,
+        organizer.config_store,
+        organizer.history_store,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert reloaded.organize_now()[0]["status"] == "deferred"
+
+
+def test_skips_are_persisted_in_history(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    downloads = Path(organizer.config.downloads_folder)
+    (downloads / "shortcut.lnk").write_text("shortcut")
+
+    organizer.organize_now()
+
+    assert organizer.history[0].kind == "skip"
+    organizer.clear_history()
+    assert organizer.history == []
+
+
+def test_undo_refuses_occupied_original_path(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+    organizer.organize_now()
+    destination = Path(organizer.history[0].destination)
+    source.write_text("new occupant")
+
+    result = organizer.undo(0)
+
+    assert result.kind == "undo-failure"
+    assert source.read_text() == "new occupant"
+    assert destination.exists()

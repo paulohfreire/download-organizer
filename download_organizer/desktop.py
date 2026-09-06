@@ -7,12 +7,12 @@ from pathlib import Path
 from tkinter import messagebox
 
 from .cli import default_config_path
-from .core import JsonConfigStore, Organizer, Rule
+from .core import JsonConfigStore, JsonHistoryStore, Organizer, Rule, WindowsNotifier
 
 
 def main() -> None:
     store = JsonConfigStore(default_config_path())
-    organizer = Organizer(store.load(), store)
+    organizer = Organizer(store.load(), store, JsonHistoryStore(default_config_path().with_name("history.json")), notifier=WindowsNotifier())
     root = tk.Tk()
     root.title("Download Organizer")
     folder = tk.StringVar(value=organizer.config.downloads_folder)
