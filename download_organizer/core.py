@@ -45,12 +45,15 @@ class OrganizerConfig:
     unsorted_folder: str = ""
     allowed_locations: list[str] = field(default_factory=list)
     rules: list[Rule] = field(default_factory=list)
+    scan_interval_seconds: int = 10
 
     def validate(self) -> None:
         if not self.downloads_folder.strip():
             raise ValueError("Downloads folder is required")
         if not self.unsorted_folder.strip():
             raise ValueError("Unsorted folder is required")
+        if self.scan_interval_seconds <= 0:
+            raise ValueError("Scan interval must be positive")
         for rule in self.rules:
             rule.validate()
         for destination in [self.unsorted_folder, *[r.destination for r in self.rules]]:
@@ -63,6 +66,7 @@ class OrganizerConfig:
             "unsorted_folder": self.unsorted_folder,
             "allowed_locations": self.allowed_locations,
             "rules": [asdict(rule) for rule in self.rules],
+            "scan_interval_seconds": self.scan_interval_seconds,
         }
 
     @classmethod
@@ -72,6 +76,7 @@ class OrganizerConfig:
             unsorted_folder=data.get("unsorted_folder", ""),
             allowed_locations=list(data.get("allowed_locations", [])),
             rules=[Rule(**item) for item in data.get("rules", [])],
+            scan_interval_seconds=int(data.get("scan_interval_seconds", 10)),
         )
 
 
@@ -156,6 +161,7 @@ class Organizer:
         self.notifications: list[str] = []
         self._last_notification: datetime | None = None
         self.notifier = notifier or (lambda _message: None)
+        self._stability: dict[str, tuple[int, int, bool]] = {}
 
     def _restore_failed(self) -> dict[str, tuple[str, int, datetime]]:
         failed: dict[str, tuple[str, int, datetime]] = {}
@@ -241,6 +247,49 @@ class Organizer:
             rule = next((candidate for candidate in self.config.rules if candidate.matches(source.name)), None)
             destination_folder = Path(rule.destination if rule else self.config.unsorted_folder)
             results.append(self._move_source(source, destination_folder, rule.name if rule else "Unsorted"))
+        return results
+
+    def initial_scan(self, confirmed: bool) -> list[dict[str, str]]:
+        """Process existing files only after explicit first-run confirmation."""
+        if not confirmed:
+            return []
+        return self.scan_once()
+
+    def on_filesystem_event(self, path: Path) -> list[dict[str, str]]:
+        """Handle one Windows filesystem event without moving an incomplete Download."""
+        return self.scan_once([Path(path)], is_rescan=False)
+
+    def rescan(self) -> list[dict[str, str]]:
+        """Rescan the configured folder to recover missed filesystem events."""
+        return self.scan_once(is_rescan=True)
+
+    def scan_once(self, paths: list[Path] | None = None, is_rescan: bool = True) -> list[dict[str, str]]:
+        self.config.validate()
+        downloads = Path(self.config.downloads_folder)
+        candidates = paths if paths is not None else (list(downloads.iterdir()) if downloads.exists() else [])
+        results: list[dict[str, str]] = []
+        for source in sorted({Path(path) for path in candidates}):
+            if not source.exists() or source.parent != downloads:
+                continue
+            if source.is_dir() or source.is_symlink() or not source.is_file() or source.suffix.lower() == ".lnk":
+                continue
+            stat = source.stat()
+            current = (stat.st_size, stat.st_mtime_ns)
+            previous = self._stability.get(str(source))
+            self._stability[str(source)] = (*current, is_rescan)
+            if previous is None or previous[:2] != current:
+                results.append({"source": str(source), "destination": "", "reason": "Awaiting Completion", "status": "waiting"})
+                continue
+            if not is_rescan:
+                results.append({"source": str(source), "destination": "", "reason": "Awaiting rescan confirmation", "status": "waiting"})
+                continue
+            self._stability.pop(str(source), None)
+            failed = self._failed.get(str(source))
+            if failed and self.clock() < failed[2]:
+                results.append({"source": str(source), "destination": "", "reason": "Retry backoff", "status": "deferred"})
+                continue
+            rule = next((candidate for candidate in self.config.rules if candidate.matches(source.name)), None)
+            results.append(self._move_source(source, Path(rule.destination if rule else self.config.unsorted_folder), rule.name if rule else "Unsorted"))
         return results
 
     def retry_failed(self, force: bool = False) -> list[dict[str, str]]:

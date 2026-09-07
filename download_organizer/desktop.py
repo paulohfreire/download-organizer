@@ -8,6 +8,7 @@ from tkinter import messagebox
 
 from .cli import default_config_path
 from .core import JsonConfigStore, JsonHistoryStore, Organizer, Rule, WindowsNotifier
+from .watcher import WindowsFileWatcher
 
 
 def main() -> None:
@@ -17,22 +18,26 @@ def main() -> None:
     root.title("Download Organizer")
     folder = tk.StringVar(value=organizer.config.downloads_folder)
     unsorted = tk.StringVar(value=organizer.config.unsorted_folder)
+    interval = tk.StringVar(value=str(organizer.config.scan_interval_seconds))
     tk.Label(root, text="Downloads folder").grid(row=0, column=0, sticky="w")
     tk.Entry(root, textvariable=folder, width=55).grid(row=0, column=1)
     tk.Label(root, text="Unsorted folder").grid(row=1, column=0, sticky="w")
     tk.Entry(root, textvariable=unsorted, width=55).grid(row=1, column=1)
+    tk.Label(root, text="Scan interval (seconds)").grid(row=2, column=0, sticky="w")
+    tk.Entry(root, textvariable=interval, width=10).grid(row=2, column=1, sticky="w")
     status = tk.StringVar()
-    tk.Label(root, textvariable=status).grid(row=4, column=0, columnspan=2, sticky="w")
-    tk.Label(root, text="Rules").grid(row=5, column=0, sticky="nw")
+    tk.Label(root, textvariable=status).grid(row=5, column=0, columnspan=2, sticky="w")
+    watcher: WindowsFileWatcher | None = None
+    tk.Label(root, text="Rules").grid(row=6, column=0, sticky="nw")
     rules = tk.Listbox(root, width=70, height=6)
-    rules.grid(row=5, column=1, rowspan=4, sticky="w")
+    rules.grid(row=6, column=1, rowspan=4, sticky="w")
     rule_name = tk.StringVar()
     rule_extension = tk.StringVar()
     rule_pattern = tk.StringVar(value="*")
     rule_destination = tk.StringVar()
     for row, (label, variable) in enumerate(
         (("Name", rule_name), ("Extension", rule_extension), ("Filename", rule_pattern), ("Destination", rule_destination)),
-        start=9,
+        start=10,
     ):
         tk.Label(root, text=label).grid(row=row, column=0, sticky="w")
         tk.Entry(root, textvariable=variable, width=55).grid(row=row, column=1, sticky="w")
@@ -96,6 +101,7 @@ def main() -> None:
         organizer.config.downloads_folder = folder.get()
         organizer.config.unsorted_folder = unsorted.get()
         try:
+            organizer.config.scan_interval_seconds = int(interval.get())
             organizer.save_configuration()
         except ValueError as error:
             messagebox.showerror("Invalid configuration", str(error))
@@ -109,12 +115,51 @@ def main() -> None:
         results = organizer.organize_now()
         status.set(f"Organized {len(results)} Downloads")
 
-    tk.Button(root, text="Save", command=save).grid(row=2, column=0)
-    tk.Button(root, text="Add rule", command=add_rule).grid(row=10, column=0)
-    tk.Button(root, text="Update rule", command=update_rule).grid(row=10, column=1, sticky="w")
-    tk.Button(root, text="Move up", command=move_rule_up).grid(row=11, column=0)
-    tk.Button(root, text="Move down", command=move_rule_down).grid(row=11, column=1, sticky="w")
-    tk.Button(root, text="Organize now", command=organize).grid(row=3, column=0, columnspan=2)
+    def initial_scan() -> None:
+        if save() and messagebox.askyesno("Initial scan", "Organize existing Downloads now?"):
+            status.set(f"Initial scan observed {len(organizer.initial_scan(True))} Downloads")
+
+    def rescan() -> None:
+        status.set(f"Rescan observed {len(organizer.rescan())} Downloads")
+
+    def start_watching() -> None:
+        nonlocal watcher
+        if not save():
+            return
+        try:
+            watcher = WindowsFileWatcher(Path(folder.get()), lambda path: root.after(0, lambda: organizer.on_filesystem_event(path)))
+            watcher.start()
+        except RuntimeError as error:
+            messagebox.showerror("Watcher unavailable", str(error))
+            watcher = None
+            return
+        status.set("Watching Downloads")
+
+        def scheduled_rescan() -> None:
+            if watcher is not None:
+                rescan()
+                root.after(organizer.config.scan_interval_seconds * 1000, scheduled_rescan)
+
+        root.after(organizer.config.scan_interval_seconds * 1000, scheduled_rescan)
+
+    def stop_watching() -> None:
+        nonlocal watcher
+        if watcher is not None:
+            watcher.stop()
+            watcher = None
+            status.set("Watcher stopped")
+
+    tk.Button(root, text="Save", command=save).grid(row=3, column=0)
+    tk.Button(root, text="Initial scan", command=initial_scan).grid(row=3, column=1, sticky="e")
+    tk.Button(root, text="Rescan", command=rescan).grid(row=4, column=0)
+    tk.Button(root, text="Start watching", command=start_watching).grid(row=4, column=1, sticky="w")
+    tk.Button(root, text="Stop watching", command=stop_watching).grid(row=5, column=1, sticky="e")
+    tk.Button(root, text="Add rule", command=add_rule).grid(row=11, column=0)
+    tk.Button(root, text="Update rule", command=update_rule).grid(row=11, column=1, sticky="w")
+    tk.Button(root, text="Move up", command=move_rule_up).grid(row=12, column=0)
+    tk.Button(root, text="Move down", command=move_rule_down).grid(row=12, column=1, sticky="w")
+    tk.Button(root, text="Organize now", command=organize).grid(row=13, column=0, columnspan=2)
     rules.bind("<<ListboxSelect>>", select_rule)
     refresh_rules()
+    root.protocol("WM_DELETE_WINDOW", lambda: (stop_watching(), root.destroy()))
     root.mainloop()

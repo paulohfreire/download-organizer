@@ -159,6 +159,58 @@ def test_skips_are_persisted_in_history(tmp_path: Path) -> None:
     assert organizer.history == []
 
 
+def test_automatic_intake_waits_for_two_stable_observations(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    organizer.add_rule(Rule("Text", ".txt", "*", str(tmp_path / "Documents")))
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+
+    first = organizer.on_filesystem_event(source)
+    second = organizer.rescan()
+
+    assert first[0]["status"] == "waiting"
+    assert second[0]["status"] == "moved"
+    assert not source.exists()
+
+
+def test_automatic_intake_does_not_move_changing_file(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("one")
+
+    organizer.on_filesystem_event(source)
+    source.write_text("two")
+    result = organizer.rescan()[0]
+
+    assert result["status"] == "waiting"
+    assert source.exists()
+
+
+def test_repeated_events_require_rescan_confirmation(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+
+    organizer.on_filesystem_event(source)
+    repeated_event = organizer.on_filesystem_event(source)
+    confirmed = organizer.rescan()
+
+    assert repeated_event[0]["status"] == "waiting"
+    assert confirmed[0]["status"] == "moved"
+
+
+def test_initial_scan_requires_confirmation_and_rescan_deduplicates(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+
+    assert organizer.initial_scan(False) == []
+    assert source.exists()
+    organizer.initial_scan(True)
+    assert organizer.rescan()[0]["status"] == "moved"
+    assert organizer.rescan() == []
+
+
 def test_undo_refuses_occupied_original_path(tmp_path: Path) -> None:
     organizer = make_organizer(tmp_path)
     source = Path(organizer.config.downloads_folder) / "file.txt"
