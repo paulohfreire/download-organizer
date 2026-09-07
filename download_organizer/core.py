@@ -46,6 +46,7 @@ class OrganizerConfig:
     allowed_locations: list[str] = field(default_factory=list)
     rules: list[Rule] = field(default_factory=list)
     scan_interval_seconds: int = 10
+    start_on_login: bool = False
 
     def validate(self) -> None:
         if not self.downloads_folder.strip():
@@ -67,6 +68,7 @@ class OrganizerConfig:
             "allowed_locations": self.allowed_locations,
             "rules": [asdict(rule) for rule in self.rules],
             "scan_interval_seconds": self.scan_interval_seconds,
+            "start_on_login": self.start_on_login,
         }
 
     @classmethod
@@ -77,11 +79,12 @@ class OrganizerConfig:
             allowed_locations=list(data.get("allowed_locations", [])),
             rules=[Rule(**item) for item in data.get("rules", [])],
             scan_interval_seconds=int(data.get("scan_interval_seconds", 10)),
+            start_on_login=bool(data.get("start_on_login", False)),
         )
 
 
 @dataclass
-class ActivityRecord:
+class MoveHistoryRecord:
     kind: str
     timestamp: str
     source: str
@@ -92,7 +95,7 @@ class ActivityRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, str]) -> "ActivityRecord":
+    def from_dict(cls, data: dict[str, str]) -> "MoveHistoryRecord":
         return cls(data["kind"], data["timestamp"], data["source"], data["destination"], data["reason"])
 
 
@@ -114,6 +117,15 @@ class JsonConfigStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
 
+    def export(self, path: Path, config: OrganizerConfig) -> None:
+        config.validate()
+        Path(path).write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+
+    def import_config(self, path: Path) -> OrganizerConfig:
+        config = OrganizerConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+        config.validate()
+        return config
+
 
 class JsonHistoryStore:
     """Persistence adapter for Move history, intentionally separate from config export."""
@@ -121,12 +133,12 @@ class JsonHistoryStore:
     def __init__(self, path: Path):
         self.path = Path(path)
 
-    def load(self) -> list[ActivityRecord]:
+    def load(self) -> list[MoveHistoryRecord]:
         if not self.path.exists():
             return []
-        return [ActivityRecord.from_dict(item) for item in json.loads(self.path.read_text(encoding="utf-8"))]
+        return [MoveHistoryRecord.from_dict(item) for item in json.loads(self.path.read_text(encoding="utf-8"))]
 
-    def save(self, records: list[ActivityRecord]) -> None:
+    def save(self, records: list[MoveHistoryRecord]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps([record.to_dict() for record in records], indent=2), encoding="utf-8")
 
@@ -191,8 +203,28 @@ class Organizer:
         rule = self.config.rules.pop(index)
         self.config.rules.insert(new_index, rule)
 
-    def _record(self, kind: str, source: Path, destination: Path | str, reason: str) -> ActivityRecord:
-        record = ActivityRecord(kind, self.clock().isoformat(), str(source), str(destination), reason)
+    def delete_rule(self, index: int) -> None:
+        del self.config.rules[index]
+
+    def export_configuration(self, path: Path) -> None:
+        if self.config_store is None:
+            raise ValueError("No configuration store configured")
+        self.config_store.export(path, self.config)
+
+    def import_configuration(self, path: Path) -> None:
+        if self.config_store is None:
+            raise ValueError("No configuration store configured")
+        imported = self.config_store.import_config(path)
+        self.config_store.save(imported)
+        self.config = imported
+
+    def move_history(self, kind: str | None = None) -> list[MoveHistoryRecord]:
+        if kind is None:
+            return list(self.history)
+        return [record for record in self.history if record.kind == kind]
+
+    def _record(self, kind: str, source: Path, destination: Path | str, reason: str) -> MoveHistoryRecord:
+        record = MoveHistoryRecord(kind, self.clock().isoformat(), str(source), str(destination), reason)
         self.history.append(record)
         if self.history_store:
             self.history_store.save(self.history)

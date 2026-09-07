@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox
+import sys
+from tkinter import filedialog, messagebox
 
 from .cli import default_config_path
 from .core import JsonConfigStore, JsonHistoryStore, Organizer, Rule, WindowsNotifier
 from .watcher import WindowsFileWatcher
+from .startup import WindowsStartup
 
 
 def main() -> None:
@@ -19,6 +21,8 @@ def main() -> None:
     folder = tk.StringVar(value=organizer.config.downloads_folder)
     unsorted = tk.StringVar(value=organizer.config.unsorted_folder)
     interval = tk.StringVar(value=str(organizer.config.scan_interval_seconds))
+    allowed = tk.StringVar(value=";".join(organizer.config.allowed_locations))
+    start_on_login = tk.BooleanVar(value=organizer.config.start_on_login)
     tk.Label(root, text="Downloads folder").grid(row=0, column=0, sticky="w")
     tk.Entry(root, textvariable=folder, width=55).grid(row=0, column=1)
     tk.Label(root, text="Unsorted folder").grid(row=1, column=0, sticky="w")
@@ -28,6 +32,11 @@ def main() -> None:
     status = tk.StringVar()
     tk.Label(root, textvariable=status).grid(row=5, column=0, columnspan=2, sticky="w")
     watcher: WindowsFileWatcher | None = None
+    history = tk.Listbox(root, width=70, height=6)
+    history.grid(row=6, column=2, rowspan=4, sticky="w")
+    tk.Label(root, text="Move history").grid(row=5, column=2, sticky="w")
+    history_filter = tk.StringVar()
+    tk.Entry(root, textvariable=history_filter, width=15).grid(row=10, column=2, sticky="w")
     tk.Label(root, text="Rules").grid(row=6, column=0, sticky="nw")
     rules = tk.Listbox(root, width=70, height=6)
     rules.grid(row=6, column=1, rowspan=4, sticky="w")
@@ -46,6 +55,12 @@ def main() -> None:
         rules.delete(0, tk.END)
         for item in organizer.config.rules:
             rules.insert(tk.END, f"{item.name}: {item.extension or '*'} {item.filename_pattern} -> {item.destination}")
+
+    def refresh_history() -> None:
+        history.delete(0, tk.END)
+        selected_kind = history_filter.get().strip() or None
+        for item in organizer.move_history(selected_kind):
+            history.insert(tk.END, f"{item.timestamp} {item.kind}: {item.source} -> {item.destination} ({item.reason})")
 
     def clear_rule_form() -> None:
         rule_name.set("")
@@ -83,6 +98,13 @@ def main() -> None:
             return
         refresh_rules()
 
+    def delete_rule() -> None:
+        selection = rules.curselection()
+        if selection:
+            organizer.delete_rule(selection[0])
+            refresh_rules()
+            clear_rule_form()
+
     def move_rule_up() -> None:
         selection = rules.curselection()
         if selection and selection[0] > 0:
@@ -102,7 +124,10 @@ def main() -> None:
         organizer.config.unsorted_folder = unsorted.get()
         try:
             organizer.config.scan_interval_seconds = int(interval.get())
+            organizer.config.allowed_locations = [item.strip() for item in allowed.get().split(";") if item.strip()]
+            organizer.config.start_on_login = start_on_login.get()
             organizer.save_configuration()
+            WindowsStartup(f'"{sys.executable}" -m download_organizer.desktop').set_enabled(organizer.config.start_on_login)
         except ValueError as error:
             messagebox.showerror("Invalid configuration", str(error))
             return False
@@ -114,13 +139,45 @@ def main() -> None:
             return
         results = organizer.organize_now()
         status.set(f"Organized {len(results)} Downloads")
+        refresh_history()
 
     def initial_scan() -> None:
         if save() and messagebox.askyesno("Initial scan", "Organize existing Downloads now?"):
             status.set(f"Initial scan observed {len(organizer.initial_scan(True))} Downloads")
+            refresh_history()
 
     def rescan() -> None:
         status.set(f"Rescan observed {len(organizer.rescan())} Downloads")
+        refresh_history()
+
+    def export_config() -> None:
+        target = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if target:
+            try:
+                organizer.export_configuration(Path(target))
+            except ValueError as error:
+                messagebox.showerror("Invalid configuration", str(error))
+
+    def import_config() -> None:
+        source = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if source:
+            try:
+                organizer.import_configuration(Path(source))
+            except (ValueError, OSError) as error:
+                messagebox.showerror("Invalid import", str(error))
+                return
+            folder.set(organizer.config.downloads_folder)
+            unsorted.set(organizer.config.unsorted_folder)
+            interval.set(str(organizer.config.scan_interval_seconds))
+            allowed.set(";".join(organizer.config.allowed_locations))
+            start_on_login.set(organizer.config.start_on_login)
+            WindowsStartup(f'"{sys.executable}" -m download_organizer.desktop').set_enabled(organizer.config.start_on_login)
+            refresh_rules()
+            status.set("Configuration imported")
+
+    def clear_history() -> None:
+        organizer.clear_history()
+        refresh_history()
 
     def start_watching() -> None:
         nonlocal watcher
@@ -158,8 +215,17 @@ def main() -> None:
     tk.Button(root, text="Update rule", command=update_rule).grid(row=11, column=1, sticky="w")
     tk.Button(root, text="Move up", command=move_rule_up).grid(row=12, column=0)
     tk.Button(root, text="Move down", command=move_rule_down).grid(row=12, column=1, sticky="w")
-    tk.Button(root, text="Organize now", command=organize).grid(row=13, column=0, columnspan=2)
+    tk.Button(root, text="Delete rule", command=delete_rule).grid(row=13, column=0)
+    tk.Button(root, text="Organize now", command=organize).grid(row=13, column=1, sticky="w")
+    tk.Button(root, text="Filter history", command=refresh_history).grid(row=11, column=2)
+    tk.Button(root, text="Clear history", command=clear_history).grid(row=12, column=2)
+    tk.Label(root, text="Allowed locations (semicolon-separated)").grid(row=14, column=0, sticky="w")
+    tk.Entry(root, textvariable=allowed, width=55).grid(row=14, column=1, columnspan=2, sticky="w")
+    tk.Checkbutton(root, text="Start on login", variable=start_on_login).grid(row=15, column=0, sticky="w")
+    tk.Button(root, text="Export config", command=export_config).grid(row=16, column=0)
+    tk.Button(root, text="Import config", command=import_config).grid(row=16, column=1, sticky="w")
     rules.bind("<<ListboxSelect>>", select_rule)
     refresh_rules()
+    refresh_history()
     root.protocol("WM_DELETE_WINDOW", lambda: (stop_watching(), root.destroy()))
     root.mainloop()

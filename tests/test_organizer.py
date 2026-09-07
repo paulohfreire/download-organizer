@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import json
 
 from datetime import datetime, timezone
 
@@ -209,6 +210,72 @@ def test_initial_scan_requires_confirmation_and_rescan_deduplicates(tmp_path: Pa
     organizer.initial_scan(True)
     assert organizer.rescan()[0]["status"] == "moved"
     assert organizer.rescan() == []
+
+
+def test_rule_can_be_deleted_and_activity_filtered_or_cleared(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    organizer.add_rule(Rule("Temporary", ".tmp", "*", str(tmp_path / "Temp")))
+    organizer.delete_rule(0)
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+
+    organizer.organize_now()
+
+    assert organizer.config.rules == []
+    assert len(organizer.move_history("move")) == 1
+    organizer.clear_history()
+    assert organizer.move_history() == []
+
+
+def test_destinations_must_be_inside_allowed_locations(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    organizer.add_rule(Rule("Outside", ".txt", "*", str(tmp_path.parent / "outside")))
+
+    with pytest.raises(ValueError, match="outside allowed"):
+        organizer.save_configuration()
+
+
+def test_export_excludes_move_history_and_import_is_validated(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    organizer.add_rule(Rule("Text", ".txt", "*", str(tmp_path / "Text")))
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+    organizer.organize_now()
+    export_path = tmp_path / "export.json"
+
+    organizer.export_configuration(export_path)
+    exported = json.loads(export_path.read_text())
+    assert "history" not in exported
+    history_before = list(organizer.history)
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(json.dumps({"downloads_folder": str(tmp_path / "Downloads"), "unsorted_folder": ""}))
+
+    with pytest.raises(ValueError):
+        organizer.import_configuration(invalid)
+    assert organizer.history == history_before
+
+
+def test_valid_import_preserves_local_history_and_preferences(tmp_path: Path) -> None:
+    organizer = make_organizer(tmp_path)
+    organizer.config.start_on_login = True
+    organizer.config.scan_interval_seconds = 25
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+    organizer.organize_now()
+    import_path = tmp_path / "import.json"
+    imported_config = OrganizerConfig(
+        downloads_folder=str(tmp_path / "Downloads"),
+        unsorted_folder=str(tmp_path / "Other"),
+        scan_interval_seconds=45,
+        start_on_login=False,
+    )
+    import_path.write_text(json.dumps(imported_config.to_dict()))
+
+    organizer.import_configuration(import_path)
+
+    assert organizer.config.scan_interval_seconds == 45
+    assert organizer.config.start_on_login is False
+    assert len(organizer.history) == 1
 
 
 def test_undo_refuses_occupied_original_path(tmp_path: Path) -> None:
