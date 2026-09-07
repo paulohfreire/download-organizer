@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import pytest
 import json
@@ -221,7 +222,10 @@ def test_automatic_intake_does_not_move_changing_file(tmp_path: Path) -> None:
     source.write_text("one")
 
     organizer.on_filesystem_event(source)
+    previous_mtime_ns = source.stat().st_mtime_ns
     source.write_text("two")
+    # Keep this completion test deterministic on filesystems with coarse mtime resolution.
+    os.utime(source, ns=(previous_mtime_ns, previous_mtime_ns + 1_000_000_000))
     result = organizer.rescan()[0]
 
     assert result["status"] == "waiting"
