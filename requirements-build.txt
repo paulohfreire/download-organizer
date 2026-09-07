@@ -1,0 +1,4 @@
+# Pinned inputs used to test and build the distributable Windows executable.
+pyinstaller==6.22.2
+pytest==9.1.1
+watchdog==6.0.0

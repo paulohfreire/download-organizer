@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
-import sys
 from tkinter import filedialog, messagebox
 
 from .cli import default_config_path
 from .core import JsonConfigStore, JsonHistoryStore, Organizer, Rule, WindowsNotifier
 from .watcher import WindowsFileWatcher
-from .startup import WindowsStartup
+from .startup import WindowsStartup, startup_command
 
 
 def main() -> None:
@@ -127,7 +126,7 @@ def main() -> None:
             organizer.config.allowed_locations = [item.strip() for item in allowed.get().split(";") if item.strip()]
             organizer.config.start_on_login = start_on_login.get()
             organizer.save_configuration()
-            WindowsStartup(f'"{sys.executable}" -m download_organizer.desktop').set_enabled(organizer.config.start_on_login)
+            WindowsStartup(startup_command()).set_enabled(organizer.config.start_on_login)
         except ValueError as error:
             messagebox.showerror("Invalid configuration", str(error))
             return False
@@ -171,7 +170,7 @@ def main() -> None:
             interval.set(str(organizer.config.scan_interval_seconds))
             allowed.set(";".join(organizer.config.allowed_locations))
             start_on_login.set(organizer.config.start_on_login)
-            WindowsStartup(f'"{sys.executable}" -m download_organizer.desktop').set_enabled(organizer.config.start_on_login)
+            WindowsStartup(startup_command()).set_enabled(organizer.config.start_on_login)
             refresh_rules()
             status.set("Configuration imported")
 

@@ -5,6 +5,19 @@ from __future__ import annotations
 import sys
 
 
+def startup_command() -> str:
+    """Return the command used by Windows to launch the desktop application.
+
+    A source checkout needs the module invocation, while a PyInstaller build
+    must launch the executable directly.  In a frozen process ``sys.executable``
+    points at the bundled application and does not accept ``-m`` arguments.
+    """
+
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    return f'"{sys.executable}" -m download_organizer.desktop'
+
+
 class WindowsStartup:
     """Manage the user's Run entry without affecting non-Windows environments."""
 

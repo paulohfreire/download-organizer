@@ -1,0 +1,93 @@
+name: Windows desktop build
+
+on:
+  push:
+    paths:
+      - "download_organizer/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "requirements-build.txt"
+      - "download-organizer.spec"
+      - ".github/workflows/windows-build.yml"
+  pull_request:
+    paths:
+      - "download_organizer/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "requirements-build.txt"
+      - "download-organizer.spec"
+      - ".github/workflows/windows-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+
+      - name: Install project and build tools
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-build.txt
+          python -m pip install . --no-deps
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Build desktop executable
+        run: python -m PyInstaller --clean --noconfirm download-organizer.spec
+
+      - name: Verify executable artifact
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $PWD "dist\DownloadOrganizer.exe"
+          if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+            throw "Expected executable was not produced: $artifact"
+          }
+          $file = Get-Item -LiteralPath $artifact
+          if ($file.Length -le 0) {
+            throw "Executable is empty: $artifact"
+          }
+          $entries = @(Get-ChildItem -LiteralPath (Join-Path $PWD "dist") -Force)
+          if ($entries.Count -ne 1 -or $entries[0].FullName -ne $file.FullName) {
+            throw "Expected a one-file build containing only DownloadOrganizer.exe"
+          }
+          $bytes = [IO.File]::ReadAllBytes($artifact)
+          if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Artifact does not have a Windows PE/DOS header: $artifact"
+          }
+          Write-Host "Verified $($file.FullName) ($($file.Length) bytes)"
+
+      - name: Smoke-test executable launch
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $PWD "dist\DownloadOrganizer.exe"
+          $process = Start-Process -FilePath $artifact -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 5
+            if ($process.HasExited) {
+              throw "Executable exited during launch with code $($process.ExitCode)"
+            }
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id
+            }
+          }
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: DownloadOrganizer-windows
+          path: dist/DownloadOrganizer.exe
+          if-no-files-found: error
