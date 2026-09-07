@@ -13,5 +13,8 @@ dependencies = ["watchdog>=4"]
 download-organizer = "download_organizer.cli:main"
 download-organizer-desktop = "download_organizer.desktop:main"
 
+[tool.setuptools.packages.find]
+include = ["download_organizer*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
