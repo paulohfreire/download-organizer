@@ -110,6 +110,47 @@ def test_collisions_are_suffixed_and_history_persists(tmp_path: Path) -> None:
     assert loaded[0].kind == "move"
 
 
+def test_collision_claims_are_atomic_and_suffix_from_original_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    organizer = make_organizer(tmp_path)
+    destination = tmp_path / "Documents"
+    organizer.add_rule(Rule("Text", ".txt", "*", str(destination)))
+    source = Path(organizer.config.downloads_folder) / "note.txt"
+    source.write_text("download")
+    import download_organizer.core as core
+    real_link = core.os.link
+
+    def race_link(link_source: Path, link_destination: Path) -> None:
+        if link_destination.name in {"note.txt", "note (1).txt"}:
+            link_destination.write_text("racer")
+        real_link(link_source, link_destination)
+
+    monkeypatch.setattr(core.os, "link", race_link)
+
+    result = organizer.organize_now()[0]
+
+    assert Path(result["destination"]).name == "note (2).txt"
+    assert (destination / "note.txt").read_text() == "racer"
+    assert (destination / "note (1).txt").read_text() == "racer"
+
+
+def test_move_falls_back_to_exclusive_copy_when_hard_links_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    organizer = make_organizer(tmp_path)
+    source = Path(organizer.config.downloads_folder) / "file.txt"
+    source.write_text("data")
+    import download_organizer.core as core
+    monkeypatch.setattr(core.os, "link", lambda *_args: (_ for _ in ()).throw(OSError("cross-device")))
+
+    result = organizer.organize_now()[0]
+
+    assert result["status"] == "moved"
+    assert not source.exists()
+    assert Path(result["destination"]).read_text() == "data"
+
+
 def test_failed_move_can_be_retried_and_notifies_once_per_minute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     current = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
     organizer = make_organizer(tmp_path)
@@ -117,8 +158,8 @@ def test_failed_move_can_be_retried_and_notifies_once_per_minute(tmp_path: Path,
     source = Path(organizer.config.downloads_folder) / "file.txt"
     source.write_text("data")
     import download_organizer.core as core
-    real_move = core.shutil.move
-    monkeypatch.setattr(core.shutil, "move", lambda *_args: (_ for _ in ()).throw(OSError("locked")))
+    real_move = core._safe_move
+    monkeypatch.setattr(core, "_safe_move", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("locked")))
 
     result = organizer.organize_now()[0]
     assert result["status"] == "failure"
@@ -127,7 +168,7 @@ def test_failed_move_can_be_retried_and_notifies_once_per_minute(tmp_path: Path,
     current[0] = current[0].replace(second=30)
     organizer.retry_failed(force=True)
     assert len(organizer.notifications) == 1
-    monkeypatch.setattr(core.shutil, "move", real_move)
+    monkeypatch.setattr(core, "_safe_move", real_move)
 
 
 def test_failed_move_backoff_survives_reload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,7 +176,7 @@ def test_failed_move_backoff_survives_reload(tmp_path: Path, monkeypatch: pytest
     source = Path(organizer.config.downloads_folder) / "file.txt"
     source.write_text("data")
     import download_organizer.core as core
-    monkeypatch.setattr(core.shutil, "move", lambda *_args: (_ for _ in ()).throw(OSError("locked")))
+    monkeypatch.setattr(core, "_safe_move", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("locked")))
     organizer.organize_now()
 
     reloaded = Organizer(

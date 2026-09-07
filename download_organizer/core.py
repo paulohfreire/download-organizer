@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import fnmatch
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -241,8 +242,7 @@ class Organizer:
         destination = destination_folder / source.name
         try:
             destination_folder.mkdir(parents=True, exist_ok=True)
-            destination = _available_path(destination)
-            shutil.move(str(source), str(destination))
+            destination = _safe_move(source, destination)
         except OSError as error:
             attempt = self._failed.get(str(source), (reason, 0, self.clock()))[1] + 1
             self._failed[str(source)] = (reason, attempt, self.clock() + timedelta(seconds=10 * attempt))
@@ -254,32 +254,7 @@ class Organizer:
         return {"source": str(source), "destination": str(destination), "reason": reason, "status": "moved"}
 
     def organize_now(self) -> list[dict[str, str]]:
-        self.config.validate()
-        downloads = Path(self.config.downloads_folder)
-        results: list[dict[str, str]] = []
-        if not downloads.exists():
-            return results
-        for source in sorted(downloads.iterdir()):
-            if source.is_dir():
-                self._record("skip", source, "", "Directory")
-                results.append({"source": str(source), "destination": "", "reason": "Directory", "status": "skip"})
-                continue
-            if source.is_symlink():
-                self._record("skip", source, "", "Symlink")
-                results.append({"source": str(source), "destination": "", "reason": "Symlink", "status": "skip"})
-                continue
-            if not source.is_file() or source.suffix.lower() == ".lnk":
-                self._record("skip", source, "", "Shortcut or non-file")
-                results.append({"source": str(source), "destination": "", "reason": "Shortcut or non-file", "status": "skip"})
-                continue
-            failed = self._failed.get(str(source))
-            if failed and self.clock() < failed[2]:
-                results.append({"source": str(source), "destination": "", "reason": "Retry backoff", "status": "deferred"})
-                continue
-            rule = next((candidate for candidate in self.config.rules if candidate.matches(source.name)), None)
-            destination_folder = Path(rule.destination if rule else self.config.unsorted_folder)
-            results.append(self._move_source(source, destination_folder, rule.name if rule else "Unsorted"))
-        return results
+        return self.scan_once(is_rescan=True, require_completion=False)
 
     def initial_scan(self, confirmed: bool) -> list[dict[str, str]]:
         """Process existing files only after explicit first-run confirmation."""
@@ -295,7 +270,12 @@ class Organizer:
         """Rescan the configured folder to recover missed filesystem events."""
         return self.scan_once(is_rescan=True)
 
-    def scan_once(self, paths: list[Path] | None = None, is_rescan: bool = True) -> list[dict[str, str]]:
+    def scan_once(
+        self,
+        paths: list[Path] | None = None,
+        is_rescan: bool = True,
+        require_completion: bool = True,
+    ) -> list[dict[str, str]]:
         self.config.validate()
         downloads = Path(self.config.downloads_folder)
         candidates = paths if paths is not None else (list(downloads.iterdir()) if downloads.exists() else [])
@@ -303,19 +283,30 @@ class Organizer:
         for source in sorted({Path(path) for path in candidates}):
             if not source.exists() or source.parent != downloads:
                 continue
-            if source.is_dir() or source.is_symlink() or not source.is_file() or source.suffix.lower() == ".lnk":
+            if source.is_dir():
+                self._record("skip", source, "", "Directory")
+                results.append({"source": str(source), "destination": "", "reason": "Directory", "status": "skip"})
                 continue
-            stat = source.stat()
-            current = (stat.st_size, stat.st_mtime_ns)
-            previous = self._stability.get(str(source))
-            self._stability[str(source)] = (*current, is_rescan)
-            if previous is None or previous[:2] != current:
-                results.append({"source": str(source), "destination": "", "reason": "Awaiting Completion", "status": "waiting"})
+            if source.is_symlink():
+                self._record("skip", source, "", "Symlink")
+                results.append({"source": str(source), "destination": "", "reason": "Symlink", "status": "skip"})
                 continue
-            if not is_rescan:
-                results.append({"source": str(source), "destination": "", "reason": "Awaiting rescan confirmation", "status": "waiting"})
+            if not source.is_file() or source.suffix.lower() == ".lnk":
+                self._record("skip", source, "", "Shortcut or non-file")
+                results.append({"source": str(source), "destination": "", "reason": "Shortcut or non-file", "status": "skip"})
                 continue
-            self._stability.pop(str(source), None)
+            if require_completion:
+                stat = source.stat()
+                current = (stat.st_size, stat.st_mtime_ns)
+                previous = self._stability.get(str(source))
+                self._stability[str(source)] = (*current, is_rescan)
+                if previous is None or previous[:2] != current:
+                    results.append({"source": str(source), "destination": "", "reason": "Awaiting Completion", "status": "waiting"})
+                    continue
+                if not is_rescan:
+                    results.append({"source": str(source), "destination": "", "reason": "Awaiting rescan confirmation", "status": "waiting"})
+                    continue
+                self._stability.pop(str(source), None)
             failed = self._failed.get(str(source))
             if failed and self.clock() < failed[2]:
                 results.append({"source": str(source), "destination": "", "reason": "Retry backoff", "status": "deferred"})
@@ -337,7 +328,7 @@ class Organizer:
                 results.append(self._move_source(source, destination, reason))
         return results
 
-    def undo(self, history_index: int) -> ActivityRecord:
+    def undo(self, history_index: int) -> MoveHistoryRecord:
         record = self.history[history_index]
         if record.kind != "move":
             raise ValueError("Only successful Moves can be undone")
@@ -349,7 +340,9 @@ class Organizer:
             return self._record("undo-failure", source, destination, "Moved file is missing")
         source.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(destination), str(source))
+            _safe_move(destination, source, allow_suffix=False)
+        except FileExistsError:
+            return self._record("undo-failure", source, destination, "Original path is occupied")
         except OSError as error:
             return self._record("undo-failure", source, destination, str(error))
         return self._record("undo", destination, source, "Move undone")
@@ -360,16 +353,38 @@ class Organizer:
             self.history_store.save(self.history)
 
 
-def _available_path(candidate: Path) -> Path:
-    if not candidate.exists():
-        return candidate
-    stem, suffix = candidate.stem, candidate.suffix
-    number = 1
+def _safe_move(source: Path, candidate: Path, allow_suffix: bool = True) -> Path:
+    """Move a file without replacing a Destination claimed by another process."""
+    number = 0
     while True:
-        alternate = candidate.with_name(f"{stem} ({number}){suffix}")
-        if not alternate.exists():
-            return alternate
-        number += 1
+        destination = candidate if number == 0 else candidate.with_name(f"{candidate.stem} ({number}){candidate.suffix}")
+        try:
+            os.link(source, destination)
+        except FileExistsError:
+            if not allow_suffix:
+                raise
+            number += 1
+            continue
+        except OSError:
+            try:
+                with destination.open("xb"):
+                    pass
+            except FileExistsError:
+                if not allow_suffix:
+                    raise
+                number += 1
+                continue
+            try:
+                shutil.copy2(source, destination)
+            except OSError:
+                destination.unlink(missing_ok=True)
+                raise
+        try:
+            source.unlink()
+        except OSError:
+            destination.unlink(missing_ok=True)
+            raise
+        return destination
 
 
 def _within_allowed(path: Path, allowed_locations: list[str]) -> bool:
