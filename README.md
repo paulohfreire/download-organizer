@@ -37,6 +37,19 @@ The CI artifact is temporary and may require repository access. A stable GitHub 
 
 The application creates missing Destination folders automatically when they are inside the configured allowed locations.
 
+## Quick-start workflow
+
+Follow this order the first time you use the application:
+
+1. Fill in **Downloads folder**, **Unsorted folder**, and **Allowed locations**.
+2. Add at least one Rule, or leave Rules empty to send every file to `Unsorted`.
+3. Click **Save settings**. The application cannot scan or organize until valid folders have been saved.
+4. For files already in Downloads, click **Initial scan** and confirm the prompt.
+5. Click **Rescan** after the files have had a stable observation. The initial scan observes files; the rescan confirms completion and performs the Move.
+6. Click **Start watching** to process new files automatically, or click **Organize now** to process the current regular files immediately.
+
+If a button appears to do nothing, check the status message at the bottom of the window and the activity history. A missing folder, an invalid Allowed location, or an unsaved configuration must be corrected before scanning can proceed.
+
 ## Organizing files
 
 The desktop controls have distinct purposes:
